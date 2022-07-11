@@ -22,10 +22,10 @@ def parse_args():
     
     parser.add_argument("--save_path", type=str, default='tmp')
     parser.add_argument("--threshold_type", type=str, default='all')
-    parser.add_argument('--threshold_prob_start', type=float, default=0.45)
+    parser.add_argument('--threshold_prob_start', type=float, default=0.5)
     parser.add_argument('--threshold_prob_end', type=float, default=0.9)
-    parser.add_argument('--threshold_trigger_start', type=int, default=20)
-    parser.add_argument('--threshold_trigger_end', type=int, default=65)
+    parser.add_argument('--threshold_trigger_start', type=int, default=15)
+    parser.add_argument('--threshold_trigger_end', type=int, default=55)
     parser.add_argument('--sample_tolerant', type=int, default=50)
 
     # EQT model hyperparameters
@@ -44,13 +44,28 @@ def parse_args():
     parser.add_argument('--hidden_dim', type=int, default=32)
     parser.add_argument('--n_layers', type=int, default=2)
 
+    # For Conformer
+    parser.add_argument('--conformer_class', type=int, default=8)
+
+    parser.add_argument('--earthquake_weight', type=int, default=5)
+
     # dataset hyperparameters
+    parser.add_argument('--workers', type=int, default=1)
+    parser.add_argument('--aug', type=bool, default=False)
+    parser.add_argument('--fixed_trigger', type=bool, default=False)
+    parser.add_argument('--fixed_trigger_point', type=int, default=300)
     parser.add_argument('--low_intensity', type=bool, default=False)
     parser.add_argument('--triangular', type=bool, default=False)
+    parser.add_argument('--gaussian', type=bool, default=False)
 
     parser.add_argument("--device", type=str, default='cpu')
     parser.add_argument("--batch_size", type=int, default=100)
-    
+    parser.add_argument('--upsample', type=bool, default=False)
+    parser.add_argument('--zscore', type=bool, default=False)
+    parser.add_argument('--wiener', type=bool, default=False)
+    parser.add_argument('--frequency', type=bool, default=False)
+    parser.add_argument('--acoustic', type=bool, default=False)
+
     opt = parser.parse_args()
 
     return opt
@@ -143,17 +158,14 @@ def inference(model, test_loader, mode, device, opt, threshold_prob, threshold_t
 
     model.eval()
     with tqdm(test_loader) as epoch:
-        for data, target in epoch:
+        for data, target, freq_feat, acu_feat, isEarthquake in epoch:
             data, target = data.to(device), target.to(device)
             
             with torch.no_grad():
-                out = model(data).squeeze().to(device)
+                out = model(data, freq_feat, acu_feat).squeeze().to(device)
                 #out = model(data.permute(0,2,1))[1].squeeze().to(device)
 
-                if opt.sliding_window:
-                    loss = loss_function_bce(out, target.squeeze(), opt.triangular, device, opt.window_size)
-                else:
-                    loss = loss_function_bce(out, target.squeeze(), opt.triangular, device)
+                loss = loss_function_bce(out, target.squeeze(), opt.triangular, opt.gaussian, isEarthquake, opt.earthquake_weight, device)
 
                 test_loss += loss.detach().cpu().item()
             
@@ -161,7 +173,6 @@ def inference(model, test_loader, mode, device, opt, threshold_prob, threshold_t
 
             out = out.detach().cpu().numpy().squeeze()
             target = target.detach().cpu().numpy().squeeze()
-            target = target[:, opt.window_size-3000:]
 
             a, b, c, d, e, f, trigger, gt_trigger = evaluation(out, target, threshold_prob, threshold_trigger, opt.sample_tolerant, mode)
              
@@ -212,12 +223,14 @@ if __name__ == '__main__':
 
     # dataset
     print('loading dataset...')
-    test_set = earthquake('test', low_inten=opt.low_intensity, triangular=opt.triangular)
-    test_loader = DataLoader(dataset=test_set, batch_size=opt.batch_size, shuffle=True, num_workers=8)
+    test_set = earthquake('test', low_inten=opt.low_intensity, triangular=opt.triangular, z_score_normalize=opt.zscore, upsample=opt.upsample
+                            , wiener=opt.wiener, frequency=opt.frequency, acoustic=opt.acoustic, window_size=opt.window_size, sliding_window=opt.sliding_window,
+                            gaussian=opt.gaussian, aug=opt.aug, fixed_trigger=opt.fixed_trigger, fixed_trigger_point=opt.fixed_trigger_point)
+    test_loader = DataLoader(dataset=test_set, batch_size=opt.batch_size, shuffle=True, num_workers=opt.workers)
 
     # model
     print('loading model...')
-    model = load_model(opt).to(device)
+    model = load_model(opt, device, opt.frequency, opt.acoustic)
 
     model_path = os.path.join(output_dir, 'model.pt')
     checkpoint = torch.load(model_path, map_location=device)

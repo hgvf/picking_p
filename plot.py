@@ -37,9 +37,23 @@ def parse_args():
     parser.add_argument('--hidden_dim', type=int, default=32)
     parser.add_argument('--n_layers', type=int, default=2)
 
+    # For Conformer
+    parser.add_argument('--conformer_class', type=int, default=8)
+
+    parser.add_argument('--earthquake_weight', type=int, default=5)
+
     # dataset hyperparameters
     parser.add_argument('--low_intensity', type=bool, default=False)
+    parser.add_argument('--aug', type=bool, default=False)
+    parser.add_argument('--fixed_trigger', type=bool, default=False)
+    parser.add_argument('--fixed_trigger_point', type=int, default=300)
     parser.add_argument('--triangular', type=bool, default=False)
+    parser.add_argument('--gaussian', type=bool, default=False)
+    parser.add_argument('--upsample', type=bool, default=False)
+    parser.add_argument('--zscore', type=bool, default=False)
+    parser.add_argument('--wiener', type=bool, default=False)
+    parser.add_argument('--frequency', type=bool, default=False)
+    parser.add_argument('--acoustic', type=bool, default=False)
 
     # threshold
     parser.add_argument('--threshold_trigger', type=int, default=40)
@@ -164,12 +178,14 @@ if __name__ == '__main__':
 
     # dataset
     print('loading dataset...')
-    test_set = earthquake('test', low_inten=opt.low_intensity, triangular=opt.triangular, plot=opt.plot)
+    test_set = earthquake('test', low_inten=opt.low_intensity, triangular=opt.triangular, z_score_normalize=opt.zscore, upsample=opt.upsample
+                            , wiener=opt.wiener, frequency=opt.frequency, acoustic=opt.acoustic, window_size=opt.window_size, sliding_window=opt.sliding_window,
+                            gaussian=opt.gaussian, aug=opt.aug, fixed_trigger=opt.fixed_trigger, fixed_trigger_point=opt.fixed_trigger_point)
     test_loader = DataLoader(dataset=test_set, batch_size=1, shuffle=True)
 
     # model
     print('loading model...')
-    model = load_model(opt).to(device)
+    model = load_model(opt, device, opt.frequency, opt.acoustic)
 
     output_dir = os.path.join('./results', opt.save_path)
     model_path = os.path.join(output_dir, 'model.pt')
@@ -182,7 +198,7 @@ if __name__ == '__main__':
     high = 0
     noise = 0
     with tqdm(test_loader) as epoch:
-        for data, target in epoch:
+        for data, target, freq_feat, acu_feat, isEarthquake in epoch:
             isLow = False
             isHigh = False
             isNoise = False
@@ -193,7 +209,12 @@ if __name__ == '__main__':
             tri = torch.where(target[0] == 1)[0]
             if len(tri) != 0:
                 snr_tmp = snr_p(data[0, :, 0].cpu().numpy(), target[0].cpu().numpy())
-                snr_cur = np.log10(snr_tmp)
+
+                if snr_tmp is None:
+                    snr_cur = 'noise'
+                else:
+                    snr_cur = np.log10(snr_tmp)
+                    
                 inten, _, _ = calc_intensity(data[0, :, 0].numpy(), data[0, :, 1].numpy(), data[0, :, 2].numpy(), 'Acceleration', 100)
 
                 if inten[-1] == 'g' or inten[-1] == 'k':
@@ -212,13 +233,10 @@ if __name__ == '__main__':
                 isNoise = True
 
             with torch.no_grad():
-                out = model(data).squeeze()
+                out = model(data, freq_feat, acu_feat).squeeze()
                 #out = model(data.permute(0,2,1))[1].squeeze()
                 
-                if opt.sliding_window:
-                    loss = loss_function_bce(out, target.squeeze(), opt.triangular, device, opt.window_size)
-                else:
-                    loss = loss_function_bce(out, target.squeeze(), opt.triangular, device)
+                loss = loss_function_bce(out, target.squeeze(), opt.triangular, opt.gaussian, isEarthquake, opt.earthquake_weight, device)
             
             epoch.set_postfix(loss=loss.item())
 
@@ -234,15 +252,15 @@ if __name__ == '__main__':
             elif b == 1:
                 res = 'fp'
                 step_fp += 1
-                cur = step_tp
+                cur = step_fp
             elif c == 1:
                 res = 'tn'
                 step_tn += 1
-                cur = step_tp
+                cur = step_tn
             else:
                 res = 'fn'
                 step_fn += 1
-                cur = step_tp
+                cur = step_fn
 
             if opt.plot and low <= 40 and isLow:
                 plot(data, out, target, cur, res, pred_trigger, gt_trigger, snr_cur, inten, plot_path)
